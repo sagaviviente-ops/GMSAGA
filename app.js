@@ -17,6 +17,7 @@ const DEFAULT_GM_INSTRUCTIONS = `Eres el Game Master (GM) de una partida de rol 
 6. Termina casi siempre tu turno dejando espacio de decisión: una pregunta implícita, una amenaza, una elección.
 7. Tono: [personalízalo aquí — ej. "oscuro y adulto", "heroico y ligero", "terror lento"].
 8. Reglas de sistema (si usas alguna: D&D, PbtA, libre...): [defínelas aquí, o borra esta línea si juegas narrativo puro].
+9. No incluyas notas de planificación, listas de comprobación ni razonamiento entre asteriscos dentro de la respuesta narrada: eso va aparte, en el canal de pensamiento del modelo, no en el texto que lee el jugador.
 
 Esto es un ejemplo de plantilla por defecto. Sustitúyelo por tus propias instrucciones — este cuadro es tuyo.`;
 
@@ -33,7 +34,8 @@ function defaultState(){
       localUrl: 'http://localhost:11434',
       localModel: 'gemma4:12b',
       maxHistoryMessages: 20,
-      warnThreshold: 40
+      warnThreshold: 40,
+      showThinking: true
     },
     campaigns: [],
     activeCampaignId: null
@@ -137,12 +139,22 @@ function buildSystemPrompt(campaign){
   return parts.join('\n\n');
 }
 
-function recentMessages(session){
+// Devuelve los últimos N mensajes de una sesión ANTERIORES a `beforeIndex`
+// (o toda la sesión si no se pasa índice). Solo se envía content, nunca thinking:
+// el razonamiento de un turno no debe reenviarse como si fuera parte de la conversación.
+function historyForPrompt(session, beforeIndex){
   const n = state.settings.maxHistoryMessages || 20;
-  return session.messages.slice(-n);
+  const slice = typeof beforeIndex === 'number' ? session.messages.slice(0, beforeIndex) : session.messages.slice();
+  return slice
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .slice(-n)
+    .map(m => ({ role: m.role, content: m.content }));
 }
 
 /* ---------------- API calls ---------------- */
+// Ambos backends devuelven { text, thinking }: el "razonamiento" de Gemma 4
+// llega ya separado del texto final (parts con thought:true en Google,
+// message.thinking en Ollama), así que no hace falta parsear nada a mano.
 
 async function callGoogle(systemText, messages){
   const { googleApiKey, googleModel } = state.settings;
@@ -153,10 +165,10 @@ async function callGoogle(systemText, messages){
     parts: [{ text: m.content }]
   }));
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(googleModel)}:generateContent?key=${encodeURIComponent(googleApiKey)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(googleModel)}:generateContent`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': googleApiKey },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: systemText }] },
       contents
@@ -168,13 +180,15 @@ async function callGoogle(systemText, messages){
     throw new Error(`Error de la API de Google (${res.status}): ${errText.slice(0,300)}`);
   }
   const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
+  const allParts = data?.candidates?.[0]?.content?.parts || [];
+  const thinking = allParts.filter(p => p.thought).map(p => p.text).join('').trim();
+  const text = allParts.filter(p => !p.thought).map(p => p.text).join('').trim();
   if(!text) throw new Error('La API de Google respondió sin texto. Revisa el modelo o la key.');
-  return text;
+  return { text, thinking };
 }
 
 async function callLocal(systemText, messages){
-  const { localUrl, localModel } = state.settings;
+  const { localUrl, localModel, showThinking } = state.settings;
   const base = (localUrl || 'http://localhost:11434').replace(/\/+$/, '');
 
   const chatMessages = [
@@ -185,7 +199,7 @@ async function callLocal(systemText, messages){
   const res = await fetch(`${base}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: localModel, messages: chatMessages, stream: false })
+    body: JSON.stringify({ model: localModel, messages: chatMessages, think: !!showThinking, stream: false })
   });
 
   if(!res.ok){
@@ -193,15 +207,18 @@ async function callLocal(systemText, messages){
     throw new Error(`Error del servidor local (${res.status}): ${errText.slice(0,300)}`);
   }
   const data = await res.json();
-  const text = data?.message?.content ?? '';
+  const text = (data?.message?.content ?? '').trim();
+  const thinking = (data?.message?.thinking ?? '').trim();
   if(!text) throw new Error('Ollama respondió sin texto. ¿Está el modelo cargado?');
-  return text;
+  return { text, thinking };
 }
 
 async function callModel(systemText, messages){
-  return state.settings.mode === 'local'
-    ? callLocal(systemText, messages)
-    : callGoogle(systemText, messages);
+  const result = state.settings.mode === 'local'
+    ? await callLocal(systemText, messages)
+    : await callGoogle(systemText, messages);
+  if(!state.settings.showThinking) result.thinking = '';
+  return result;
 }
 
 /* ---------------- Memory summarization ---------------- */
@@ -213,13 +230,14 @@ Devuelve SOLO una lista de viñetas breves (máximo 12) con: hechos ocurridos, d
 async function summarizeSession(campaign, session){
   if(!session.messages.length) return '';
   const transcript = session.messages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
     .map(m => `${m.role === 'user' ? 'Jugador' : 'GM'}: ${m.content}`)
     .join('\n');
 
-  const text = await callModel(SUMMARY_INSTRUCTION, [
+  const result = await callModel(SUMMARY_INSTRUCTION, [
     { role: 'user', content: transcript.slice(0, 20000) }
   ]);
-  return text.trim();
+  return result.text.trim();
 }
 
 async function summarizeAndMerge(campaign, session, { silent=false } = {}){
@@ -238,7 +256,7 @@ async function summarizeAndMerge(campaign, session, { silent=false } = {}){
   }
 }
 
-/* ---------------- Chat sending ---------------- */
+/* ---------------- Chat sending / editing / regenerating ---------------- */
 
 async function sendMessage(text){
   const campaign = getActiveCampaign();
@@ -253,9 +271,9 @@ async function sendMessage(text){
   setStatus('El GM está pensando…');
   try{
     const systemText = buildSystemPrompt(campaign);
-    const history = recentMessages(session);
-    const reply = await callModel(systemText, history);
-    session.messages.push({ role: 'assistant', content: reply, ts: Date.now() });
+    const history = historyForPrompt(session);
+    const result = await callModel(systemText, history);
+    session.messages.push({ role: 'assistant', content: result.text, thinking: result.thinking, ts: Date.now() });
     saveState();
     renderChat();
     setStatus('');
@@ -264,6 +282,47 @@ async function sendMessage(text){
     saveState();
     renderChat();
     setStatus('');
+  }finally{
+    setSending(false);
+  }
+}
+
+function deleteMessage(index){
+  const campaign = getActiveCampaign();
+  const session = getActiveSession(campaign);
+  if(!session) return;
+  session.messages.splice(index, 1);
+  saveState();
+  renderChat();
+}
+
+function saveEditedMessage(index, newContent){
+  const campaign = getActiveCampaign();
+  const session = getActiveSession(campaign);
+  if(!session || !session.messages[index]) return;
+  session.messages[index].content = newContent;
+  saveState();
+  renderChat();
+}
+
+async function regenerateMessage(index){
+  const campaign = getActiveCampaign();
+  const session = getActiveSession(campaign);
+  if(!campaign || !session || !session.messages[index]) return;
+  if(session.messages[index].role !== 'assistant') return;
+
+  setSending(true);
+  setStatus('Rehaciendo respuesta del GM…');
+  try{
+    const systemText = buildSystemPrompt(campaign);
+    const history = historyForPrompt(session, index);
+    const result = await callModel(systemText, history);
+    session.messages[index] = { role: 'assistant', content: result.text, thinking: result.thinking, ts: Date.now() };
+    saveState();
+    renderChat();
+    setStatus('');
+  }catch(e){
+    setStatus('No se pudo rehacer: ' + e.message, true);
   }finally{
     setSending(false);
   }
@@ -337,22 +396,121 @@ function renderSessionList(campaign){
   });
 }
 
+let editingIndex = null;
+
 function renderChat(){
   const campaign = getActiveCampaign();
   const session = getActiveSession(campaign);
   const log = el('#chat-log');
   log.innerHTML = '';
   if(!session) return;
-  session.messages.forEach(m => {
-    const div = document.createElement('div');
-    if(m.role === 'user') div.className = 'msg msg-user';
-    else if(m.role === 'assistant') div.className = 'msg msg-gm';
-    else div.className = 'msg msg-system';
-    div.textContent = m.content;
-    log.appendChild(div);
+
+  session.messages.forEach((m, index) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-wrap msg-wrap-' + m.role;
+    wrap.dataset.index = index;
+
+    if(editingIndex === index){
+      wrap.appendChild(buildEditBox(m, index));
+      log.appendChild(wrap);
+      return;
+    }
+
+    const bubble = document.createElement('div');
+    bubble.className = m.role === 'user' ? 'msg msg-user'
+      : m.role === 'assistant' ? 'msg msg-gm'
+      : 'msg msg-system';
+
+    if(m.role === 'assistant' && m.thinking){
+      const details = document.createElement('details');
+      details.className = 'thinking';
+      const summary = document.createElement('summary');
+      summary.textContent = '💭 Ver razonamiento del GM';
+      const pre = document.createElement('pre');
+      pre.textContent = m.thinking;
+      details.appendChild(summary);
+      details.appendChild(pre);
+      bubble.appendChild(details);
+    }
+
+    const textNode = document.createElement('div');
+    textNode.className = 'msg-text';
+    textNode.textContent = m.content;
+    bubble.appendChild(textNode);
+
+    wrap.appendChild(bubble);
+
+    if(m.role !== 'system'){
+      wrap.appendChild(buildToolbar(m, index));
+    }
+
+    log.appendChild(wrap);
   });
+
   const scroller = el('#chat-scroll');
   scroller.scrollTop = scroller.scrollHeight;
+}
+
+function buildToolbar(message, index){
+  const bar = document.createElement('div');
+  bar.className = 'msg-toolbar';
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'msg-action';
+  editBtn.title = 'Editar';
+  editBtn.textContent = '✎';
+  editBtn.addEventListener('click', () => { editingIndex = index; renderChat(); });
+  bar.appendChild(editBtn);
+
+  if(message.role === 'assistant'){
+    const redoBtn = document.createElement('button');
+    redoBtn.className = 'msg-action';
+    redoBtn.title = 'Rehacer (pide otra respuesta al GM desde este punto)';
+    redoBtn.textContent = '↻';
+    redoBtn.addEventListener('click', () => regenerateMessage(index));
+    bar.appendChild(redoBtn);
+  }
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'msg-action msg-action-danger';
+  delBtn.title = 'Borrar';
+  delBtn.textContent = '🗑';
+  delBtn.addEventListener('click', () => {
+    if(confirm('¿Borrar este mensaje?')) deleteMessage(index);
+  });
+  bar.appendChild(delBtn);
+
+  return bar;
+}
+
+function buildEditBox(message, index){
+  const box = document.createElement('div');
+  box.className = 'msg-editbox';
+
+  const textarea = document.createElement('textarea');
+  textarea.value = message.content;
+  box.appendChild(textarea);
+
+  const actions = document.createElement('div');
+  actions.className = 'msg-editbox-actions';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'primary-btn';
+  saveBtn.textContent = 'Guardar';
+  saveBtn.addEventListener('click', () => {
+    editingIndex = null;
+    saveEditedMessage(index, textarea.value);
+  });
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'ghost-btn';
+  cancelBtn.textContent = 'Cancelar';
+  cancelBtn.addEventListener('click', () => { editingIndex = null; renderChat(); });
+
+  actions.appendChild(saveBtn);
+  actions.appendChild(cancelBtn);
+  box.appendChild(actions);
+  return box;
 }
 
 function setSending(isSending){
@@ -519,6 +677,7 @@ el('#btn-settings').addEventListener('click', () => {
   el('#setting-local-model').value = state.settings.localModel;
   el('#setting-max-history').value = state.settings.maxHistoryMessages;
   el('#setting-warn-threshold').value = state.settings.warnThreshold;
+  el('#setting-show-thinking').checked = !!state.settings.showThinking;
   openModal('#modal-settings');
 });
 
@@ -539,6 +698,7 @@ el('#btn-settings-save').addEventListener('click', () => {
   state.settings.localModel = el('#setting-local-model').value.trim() || 'gemma4:12b';
   state.settings.maxHistoryMessages = parseInt(el('#setting-max-history').value, 10) || 20;
   state.settings.warnThreshold = parseInt(el('#setting-warn-threshold').value, 10) || 40;
+  state.settings.showThinking = el('#setting-show-thinking').checked;
   saveState();
   closeModal('#modal-settings');
   renderCampaignView();
