@@ -217,6 +217,13 @@ textarea,input,select{font-family:inherit;color:inherit;}
   border-top:1px solid var(--border);
 }
 
+.msg-docs{
+  margin-top:8px;
+  font-size:11px;
+  color:var(--text-faint);
+  font-family:var(--mono);
+}
+
 .msg-toolbar{
   display:flex;gap:2px;opacity:0;transition:opacity .1s;
   padding:0 4px;
