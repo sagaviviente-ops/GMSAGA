@@ -198,6 +198,15 @@
         <span>Aviso de "sesión larga" a partir de</span>
         <input type="number" id="setting-warn-threshold" min="10" max="200" step="5">
       </label>
+      <label class="field field-checkbox">
+        <input type="checkbox" id="setting-show-thinking">
+        <span>Pedir y mostrar el razonamiento del GM (desplegable "💭 Ver razonamiento")</span>
+      </label>
+      <p class="field-hint">
+        Gemma 4 puede "pensar" antes de responder y ese razonamiento llega aparte del texto narrado.
+        Actívalo si te gusta verlo; en local además hace la respuesta más lenta. En la API de Google el
+        modelo genera ese pensamiento igualmente aunque lo ocultes aquí, esta opción solo controla si lo ves.
+      </p>
     </div>
 
     <div class="modal-actions">
