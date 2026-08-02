@@ -136,7 +136,7 @@ function buildSystemPrompt(campaign){
     parts.push(`--- DOCUMENTOS DE CONTEXTO ---\n${docsText}`);
   }
 
-  return parts.join('\n\n');
+  return { systemText: parts.join('\n\n'), docsUsed: activeDocs.map(d => d.name) };
 }
 
 // Devuelve los últimos N mensajes de una sesión ANTERIORES a `beforeIndex`
@@ -270,10 +270,10 @@ async function sendMessage(text){
   setSending(true);
   setStatus('El GM está pensando…');
   try{
-    const systemText = buildSystemPrompt(campaign);
+    const { systemText, docsUsed } = buildSystemPrompt(campaign);
     const history = historyForPrompt(session);
     const result = await callModel(systemText, history);
-    session.messages.push({ role: 'assistant', content: result.text, thinking: result.thinking, ts: Date.now() });
+    session.messages.push({ role: 'assistant', content: result.text, thinking: result.thinking, docsUsed, ts: Date.now() });
     saveState();
     renderChat();
     setStatus('');
@@ -314,10 +314,10 @@ async function regenerateMessage(index){
   setSending(true);
   setStatus('Rehaciendo respuesta del GM…');
   try{
-    const systemText = buildSystemPrompt(campaign);
+    const { systemText, docsUsed } = buildSystemPrompt(campaign);
     const history = historyForPrompt(session, index);
     const result = await callModel(systemText, history);
-    session.messages[index] = { role: 'assistant', content: result.text, thinking: result.thinking, ts: Date.now() };
+    session.messages[index] = { role: 'assistant', content: result.text, thinking: result.thinking, docsUsed, ts: Date.now() };
     saveState();
     renderChat();
     setStatus('');
@@ -386,14 +386,37 @@ function renderSessionList(campaign){
   campaign.sessions.forEach(s => {
     const item = document.createElement('div');
     item.className = 'rail-item' + (s.id === campaign.activeSessionId ? ' is-active' : '');
-    item.innerHTML = `<span>${escapeHtml(s.name)}</span><span class="doc-item-meta">${s.messages.length}</span>`;
-    item.addEventListener('click', () => {
+    item.innerHTML = `
+      <span>${escapeHtml(s.name)}</span>
+      <span class="doc-item-meta">${s.messages.length}</span>
+      <button class="rail-item-del" title="Borrar sesión">×</button>
+    `;
+    item.addEventListener('click', (e) => {
+      if(e.target.closest('.rail-item-del')) return;
       campaign.activeSessionId = s.id;
       saveState();
       renderCampaignView();
     });
+    item.querySelector('.rail-item-del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if(confirm(`¿Borrar "${s.name}"? Esto no toca la memoria ya resumida, pero se pierde el chat de esta sesión.`)){
+        deleteSession(campaign, s.id);
+      }
+    });
     list.appendChild(item);
   });
+}
+
+function deleteSession(campaign, sessionId){
+  campaign.sessions = campaign.sessions.filter(s => s.id !== sessionId);
+  if(campaign.sessions.length === 0){
+    campaign.sessions.push(createSessionObject(1));
+  }
+  if(campaign.activeSessionId === sessionId || !campaign.sessions.find(s => s.id === campaign.activeSessionId)){
+    campaign.activeSessionId = campaign.sessions[0].id;
+  }
+  saveState();
+  renderCampaignView();
 }
 
 let editingIndex = null;
@@ -437,6 +460,13 @@ function renderChat(){
     textNode.className = 'msg-text';
     textNode.textContent = m.content;
     bubble.appendChild(textNode);
+
+    if(m.role === 'assistant' && m.docsUsed && m.docsUsed.length){
+      const docsLine = document.createElement('div');
+      docsLine.className = 'msg-docs';
+      docsLine.textContent = '📄 Leyó: ' + m.docsUsed.join(' · ');
+      bubble.appendChild(docsLine);
+    }
 
     wrap.appendChild(bubble);
 
