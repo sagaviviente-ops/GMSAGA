@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mesa · GM con IA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app" id="app">
+
+  <!-- SIDEBAR -->
+  <aside class="rail">
+    <div class="rail-brand">
+      <span class="rail-brand-mark">◆</span>
+      <span class="rail-brand-text">Mesa</span>
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-section-head">
+        <span>Campañas</span>
+        <button class="icon-btn" id="btn-new-campaign" title="Nueva campaña">+</button>
+      </div>
+      <div id="campaign-list" class="rail-list"></div>
+    </div>
+
+    <div class="rail-section" id="session-section" hidden>
+      <div class="rail-section-head">
+        <span>Sesiones</span>
+        <button class="icon-btn" id="btn-new-session" title="Nueva sesión (resume la anterior en la memoria)">+</button>
+      </div>
+      <div id="session-list" class="rail-list"></div>
+    </div>
+
+    <div class="rail-footer">
+      <button class="ghost-btn" id="btn-settings">⚙ Ajustes del modelo</button>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="stage" id="stage">
+
+    <div class="empty-state" id="empty-state">
+      <div class="empty-mark">◆</div>
+      <h1>No hay ninguna campaña abierta</h1>
+      <p>Crea una campaña en la barra lateral para empezar a jugar.</p>
+    </div>
+
+    <div class="campaign-view" id="campaign-view" hidden>
+
+      <header class="stage-header">
+        <div class="stage-header-titles">
+          <input id="campaign-name" class="campaign-name-input" spellcheck="false">
+          <span id="session-name" class="session-badge"></span>
+        </div>
+        <div class="stage-header-actions">
+          <button class="ghost-btn" id="btn-docs" title="Documentos de contexto">📄 Documentos</button>
+          <button class="ghost-btn" id="btn-gm" title="Instrucciones del GM">🎭 Instrucciones del GM</button>
+          <button class="ghost-btn" id="btn-memory" title="Memoria persistente de la campaña">🧠 Memoria</button>
+        </div>
+      </header>
+
+      <div class="token-banner" id="token-banner" hidden>
+        Esta sesión ya tiene bastantes mensajes. Para ahorrar tokens y mantener al GM despierto,
+        considera <button class="link-btn" id="btn-suggest-summarize">resumir y abrir una sesión nueva</button>.
+      </div>
+
+      <div class="chat-scroll" id="chat-scroll">
+        <div class="chat-log" id="chat-log"></div>
+      </div>
+
+      <form class="composer" id="composer">
+        <textarea id="composer-input" placeholder="Describe tu acción o di algo a la mesa…" rows="2"></textarea>
+        <button type="submit" id="btn-send" class="send-btn">Enviar</button>
+      </form>
+      <div class="composer-status" id="composer-status"></div>
+    </div>
+  </main>
+</div>
+
+<!-- GM INSTRUCTIONS MODAL -->
+<div class="modal-backdrop" id="modal-gm" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Instrucciones del GM</h2>
+      <button class="icon-btn" data-close>×</button>
+    </div>
+    <p class="modal-hint">Este es el "system prompt" que define cómo interpreta la IA al Game Master. Cada campaña tiene el suyo. Bórralo, edítalo o sustitúyelo por el tuyo.</p>
+    <textarea id="gm-instructions-text" class="modal-textarea mono"></textarea>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="btn-gm-restore-default">Restaurar ejemplo por defecto</button>
+      <button class="ghost-btn" id="btn-gm-clear">Vaciar</button>
+      <button class="primary-btn" id="btn-gm-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- DOCUMENTS MODAL -->
+<div class="modal-backdrop" id="modal-docs" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Documentos de contexto</h2>
+      <button class="icon-btn" data-close>×</button>
+    </div>
+    <p class="modal-hint">Sube lore, fichas de personaje o notas en .txt / .md. Solo los documentos marcados como "activos" se envían al modelo, para no gastar tokens de más.</p>
+    <input type="file" id="doc-upload" accept=".txt,.md,.markdown" multiple hidden>
+    <button class="ghost-btn" id="btn-doc-upload">+ Subir documento</button>
+    <div id="doc-list" class="doc-list"></div>
+  </div>
+</div>
+
+<!-- MEMORY MODAL -->
+<div class="modal-backdrop" id="modal-memory" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Memoria persistente</h2>
+      <button class="icon-btn" data-close>×</button>
+    </div>
+    <p class="modal-hint">Resumen de lo ocurrido en sesiones anteriores de esta campaña. Se envía en cada mensaje para que el GM no olvide la historia. Puedes editarlo a mano.</p>
+    <textarea id="memory-text" class="modal-textarea"></textarea>
+    <div class="modal-actions">
+      <button class="ghost-btn" id="btn-summarize-now">🧠 Resumir sesión actual ahora</button>
+      <button class="primary-btn" id="btn-memory-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div class="modal-backdrop" id="modal-settings" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Ajustes del modelo</h2>
+      <button class="icon-btn" data-close>×</button>
+    </div>
+
+    <div class="settings-tabs">
+      <button class="tab-btn is-active" data-tab="google">Google AI (API)</button>
+      <button class="tab-btn" data-tab="local">Local (tu PC)</button>
+      <button class="tab-btn" data-tab="advanced">Memoria y tokens</button>
+    </div>
+
+    <div class="tab-panel is-active" data-panel="google">
+      <label class="field">
+        <span>Modo activo</span>
+        <select id="setting-mode">
+          <option value="google">Usar API de Google (Gemma 4 en la nube)</option>
+          <option value="local">Usar modelo local (Ollama en tu PC)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>API Key de Google AI Studio</span>
+        <input type="password" id="setting-google-key" placeholder="AIza…">
+      </label>
+      <label class="field">
+        <span>Modelo</span>
+        <select id="setting-google-model">
+          <option value="gemma-4-31b-it">gemma-4-31b-it (denso, más calidad)</option>
+          <option value="gemma-4-26b-a4b-it">gemma-4-26b-a4b-it (MoE, más rápido/barato)</option>
+        </select>
+      </label>
+      <p class="field-hint">
+        Consigue una API key gratuita en <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.
+        La key se guarda solo en tu navegador (localStorage), nunca sale hacia otro sitio.
+      </p>
+    </div>
+
+    <div class="tab-panel" data-panel="local">
+      <label class="field">
+        <span>URL del servidor local (Ollama)</span>
+        <input type="text" id="setting-local-url" placeholder="http://localhost:11434">
+      </label>
+      <label class="field">
+        <span>Nombre del modelo</span>
+        <input type="text" id="setting-local-model" placeholder="gemma4:12b">
+      </label>
+      <p class="field-hint">
+        Para tu RTX 3060 (12 GB VRAM) el mejor equilibrio es <strong>gemma4:12b</strong> (~8 GB en Q4, entra entero en VRAM).
+        Instala <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>, ejecuta <code>ollama pull gemma4:12b</code> y luego <code>ollama serve</code>.
+        Como esta web se aloja en GitHub Pages, el navegador llama a tu PC en localhost: arranca Ollama con la variable
+        <code>OLLAMA_ORIGINS=*</code> (o el dominio exacto de tu página) para que no bloquee la petición por CORS.
+      </p>
+    </div>
+
+    <div class="tab-panel" data-panel="advanced">
+      <label class="field">
+        <span>Mensajes recientes a enviar en cada turno</span>
+        <input type="number" id="setting-max-history" min="4" max="60" step="2">
+      </label>
+      <p class="field-hint">
+        Solo se envían al modelo los últimos N mensajes de la sesión actual, más la memoria resumida y los documentos activos.
+        El historial completo se sigue guardando en tu navegador, esto solo limita lo que se paga/procesa en cada turno.
+        Bájalo si notas que las sesiones se vuelven lentas o caras; súbelo si el GM pierde detalles recientes.
+      </p>
+      <label class="field">
+        <span>Aviso de "sesión larga" a partir de</span>
+        <input type="number" id="setting-warn-threshold" min="10" max="200" step="5">
+      </label>
+    </div>
+
+    <div class="modal-actions">
+      <button class="primary-btn" id="btn-settings-save">Guardar ajustes</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
